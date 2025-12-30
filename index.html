@@ -2,12 +2,96 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>seedcore-hotel-simulator</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+    />
+    <title>SeedCore: Virtual Hotel Director</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,400&family=Inter:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Global styles -->
+    <style>
+      :root {
+        --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+          "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #020617;
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      * {
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      ::-webkit-scrollbar {
+        display: none;
+      }
+
+      * {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+
+      .font-display {
+        font-family: "Cinzel", serif;
+      }
+      .font-body {
+        font-family: "Cormorant Garamond", serif;
+      }
+      .font-tech {
+        font-family: var(--font-mono);
+      }
+      .font-system {
+        font-family: var(--font-sans);
+      }
+
+      .scanline-overlay::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+              rgba(18, 16, 16, 0) 50%,
+              rgba(0, 0, 0, 0.15) 50%
+            ),
+          linear-gradient(
+            90deg,
+            rgba(255, 0, 0, 0.03),
+            rgba(0, 255, 0, 0.01),
+            rgba(0, 0, 255, 0.03)
+          );
+        background-size: 100% 2px, 3px 100%;
+        pointer-events: none;
+        opacity: 0.1;
+        z-index: 100;
+      }
+    </style>
   </head>
-  <body>
-    <div id="root"></div>
+
+  <body class="bg-slate-950 text-slate-200">
+    <div id="root" class="w-full h-full scanline-overlay"></div>
+
+    <!-- Vite entry -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
