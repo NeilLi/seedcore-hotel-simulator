@@ -19,6 +19,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.22.1",
+    "kafkajs": "^2.2.4",
     "lucide-react": "0.474.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

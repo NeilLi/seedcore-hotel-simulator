@@ -95,13 +95,7 @@ export function VirtualRealityLayer({
           <img
             src={backgroundImage}
             alt="Atmosphere"
-            className="absolute inset-0 w-full h-full object-cover object-center opacity-40"
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: 'center'
-            }}
+            className="w-full h-full object-cover opacity-40"
             onError={(e) => (e.currentTarget.style.display = "none")}
           />
         ) : (

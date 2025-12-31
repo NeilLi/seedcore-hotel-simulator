@@ -6,15 +6,51 @@ import {
   Aperture,
   RefreshCw,
   X,
-  Bot,
+  Shield,
+  Wifi,
+  Hexagon,
 } from "lucide-react";
 
 import { geminiService } from "../services/geminiService";
 import { VirtualRealityLayer } from "./VirtualRealityLayer";
 import type { SeedCoreState, Room, Agent } from "../types";
 import { useDebounced } from "../hooks/useDebounced";
+import { useEventTracking } from "../hooks/useEventTracking";
 
 import lobbyImage from "../assets/lobby.png";
+
+/* -------------------------- Parallax Tilt Hook --------------------------- */
+
+function useParallaxTilt(enabled: boolean) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!enabled || !ref.current) return;
+    const el = ref.current;
+
+    const onMove = (e: MouseEvent) => {
+      const r = el.getBoundingClientRect();
+      const px = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+      const py = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+      const rotY = px * 10;      // +/- 10deg
+      const rotX = -py * 8;      // +/- 8deg
+      el.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg) translateZ(0)`;
+    };
+
+    const onLeave = () => {
+      el.style.transform = `rotateX(0deg) rotateY(0deg) translateZ(0)`;
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseleave", onLeave);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseleave", onLeave);
+    };
+  }, [enabled]);
+
+  return ref;
+}
 
 /* ---------------------------------- Types --------------------------------- */
 
@@ -48,6 +84,9 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
   const [visualLoading, setVisualLoading] = useState(false);
   const [showRobotPanel, setShowRobotPanel] = useState(false);
   
+  // Event tracking
+  const events = useEventTracking();
+  
   // NPC state
   const [npcSubtitle, setNpcSubtitle] = useState<string>("");
   const [npcSubtitleVisible, setNpcSubtitleVisible] = useState(false);
@@ -55,16 +94,29 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const inFlightRef = useRef<AbortController | null>(null);
   const cooldownUntilRef = useRef<number>(0);
+  
+  // 3D parallax tilt for robot panel
+  const tiltRef = useParallaxTilt(showRobotPanel);
+  
+  // Robot panel system vitals (simulated)
+  const systemVitals = {
+    neural: 92,
+    security: 100,
+    uplink: 88,
+  };
 
   /* -------------------------- Keyboard Shortcut --------------------------- */
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Enter") onExitLobby();
+      if (e.key === "Enter") {
+        events.emitKeyboardPressed({ key: e.key, action: "exit-lobby" });
+        onExitLobby();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onExitLobby]);
+  }, [onExitLobby, events]);
 
   /* -------------------------- Debug: Hotspot Visibility --------------------------- */
 
@@ -298,15 +350,21 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
           <button
             onClick={() => {
               console.log("🤖 Robot hotspot clicked!");
+              events.emitButtonClick({ buttonId: "robot-hotspot", action: "open-panel" });
               setShowRobotPanel(true);
             }}
             onPointerEnter={() => {
               console.log("👆 Robot hotspot hover detected (onPointerEnter)");
-              console.log("📞 Calling debouncedSpeak...");
+              events.emitHotspotEntered({ 
+                hotspotId: "robot-concierge",
+                atmosphere: coreState.activeAtmosphere,
+                timeOfDay: coreState.timeOfDay 
+              });
               debouncedSpeak();
             }}
             onPointerLeave={() => {
               console.log("👋 Robot hotspot hover ended (onPointerLeave)");
+              events.emitHotspotLeft({ hotspotId: "robot-concierge" });
               // Cancel in-flight requests and stop audio
               inFlightRef.current?.abort();
               if (audioRef.current) {
@@ -429,7 +487,10 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
               System State: Decoupled
                </p>
                <button 
-                 onClick={() => setIsAiEnabled(true)}
+              onClick={() => {
+                events.emitButtonClick({ buttonId: "initialize-intelligence", action: "enable-ai" });
+                setIsAiEnabled(true);
+              }}
               className="px-10 py-4 rounded-full text-xs font-bold tracking-widest uppercase shadow-xl transition-all hover:bg-cyan-400 hover:scale-105"
               style={{
                 backgroundColor: '#ffffff',
@@ -551,7 +612,10 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
             {choices.map((c, i) => (
                       <button
                 key={i}
-                onClick={() => handleTurn(c)}
+                onClick={() => {
+                  events.emitButtonClick({ buttonId: "lobby-choice", choice: c, index: i });
+                  handleTurn(c);
+                }}
                 className="px-6 py-3 rounded-xl text-xs uppercase tracking-widest backdrop-blur-md border border-white/20 transition-all hover:bg-white/30"
                 style={{
                   backgroundColor: 'rgba(0, 0, 0, 0.5)',
@@ -563,7 +627,10 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
             ))}
 
                  <button 
-              onClick={regenerateVisuals}
+              onClick={() => {
+                events.emitButtonClick({ buttonId: "regenerate-visuals", atmosphere: coreState.activeAtmosphere });
+                regenerateVisuals();
+              }}
               className="p-3 rounded-xl backdrop-blur-md border border-white/20 transition-all hover:bg-white/30"
               title="Regenerate Visuals"
               style={{
@@ -581,8 +648,11 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
           </div>
 
           {/* Director Mode Button - Bottom Right */}
-                 <button 
-                   onClick={onExitLobby}
+          <button
+            onClick={() => {
+              events.emitButtonClick({ buttonId: "director-mode", action: "exit-lobby" });
+              onExitLobby();
+            }}
             className="px-6 py-3 bg-white text-black rounded-full text-xs font-bold tracking-widest uppercase shadow-xl hover:bg-cyan-50 transition-all pointer-events-auto"
             style={{ 
               position: 'fixed',
@@ -596,75 +666,187 @@ export const VirtualLobby: React.FC<VirtualLobbyProps> = ({
         </div>
       )}
 
-      {/* ----------------------- Robot Concierge Panel ----------------------- */}
+      {/* ----------------------- Robot Concierge Panel (3D HUD) ----------------------- */}
       {showRobotPanel && (
         <div
           className="fixed inset-0 flex items-center justify-center pointer-events-auto z-[10000]"
           style={{
             backgroundColor: 'rgba(0, 0, 0, 0.7)',
-            backdropFilter: 'blur(4px)'
+            backdropFilter: 'blur(4px)',
+            overflow: 'visible', // Allow floating elements to show
           }}
           onClick={() => setShowRobotPanel(false)}
         >
           <div
-            className="relative max-w-md w-full mx-4 p-8 rounded-2xl backdrop-blur-md border border-white/20"
+            className="relative max-w-md w-full mx-4 rounded-3xl border border-white/15"
             style={{
-              backgroundColor: 'rgba(0, 0, 0, 0.85)',
-              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.8), 0 0 40px rgba(34, 211, 238, 0.2)'
+              background: "linear-gradient(180deg, rgba(10,10,16,0.92), rgba(2,6,23,0.82))",
+              boxShadow: "0 30px 90px rgba(0,0,0,0.85), 0 0 70px rgba(34,211,238,0.18)",
+              transformStyle: "preserve-3d",
+              perspective: "1200px",
+              overflow: "visible", // Allow floating elements
+              minHeight: "500px", // Ensure enough space for all content
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Close Button */}
-            <button
-              onClick={() => setShowRobotPanel(false)}
-              className="absolute top-4 right-4 p-2 rounded-full hover:bg-white/10 transition-all"
-              style={{ color: '#ffffff' }}
-              aria-label="Close"
+            {/* 3D Tilt Layer */}
+            <div
+              ref={tiltRef}
+              className="relative p-8 min-h-[450px]"
+              style={{
+                transition: "transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+                transformStyle: "preserve-3d",
+                overflow: "visible", // Allow floating data nodes to show
+              }}
             >
-              <X size={20} />
-            </button>
+              {/* Depth frame */}
+              <div
+                className="absolute inset-0 pointer-events-none"
+                style={{
+                  borderRadius: 24,
+                  boxShadow:
+                    "inset 0 0 0 1px rgba(255,255,255,0.08), inset 0 -30px 60px rgba(0,0,0,0.55)",
+                }}
+              />
 
-            {/* Panel Content */}
-            <div className="text-center space-y-6">
-              <div className="flex justify-center">
-                <Bot size={48} style={{ color: '#22d3ee' }} />
-              </div>
-              <h2 className="text-2xl font-bold uppercase tracking-widest" style={{ color: '#ffffff' }}>
-                Core Concierge
-              </h2>
-              <p className="text-sm leading-relaxed" style={{ color: '#cbd5e1' }}>
-                How may I assist you today?
-              </p>
-              <div className="pt-4 space-y-3">
-                <button
-                  onClick={() => {
-                    handleTurn("Ask the Concierge for assistance");
-                    setShowRobotPanel(false);
-                  }}
-                  className="w-full px-6 py-3 rounded-xl backdrop-blur-md border border-white/20 transition-all hover:bg-white/10"
-                  style={{
-                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-                    color: '#ffffff'
-                  }}
+              {/* Holographic shimmer */}
+              <div
+                className="absolute -inset-40 opacity-40 pointer-events-none"
+                style={{
+                  background:
+                    "conic-gradient(from 180deg, rgba(34,211,238,0.0), rgba(34,211,238,0.18), rgba(168,85,247,0.12), rgba(34,211,238,0.0))",
+                  filter: "blur(18px)",
+                  animation: "spinSlow 10s linear infinite",
+                  transform: "translateZ(40px)",
+                }}
+              />
+
+              {/* Scanlines */}
+              <div
+                className="absolute inset-0 pointer-events-none opacity-15"
+                style={{
+                  background:
+                    "repeating-linear-gradient(to bottom, rgba(255,255,255,0.08), rgba(255,255,255,0.08) 1px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 7px)",
+                  mixBlendMode: "overlay",
+                  transform: "translateZ(20px)",
+                }}
+              />
+
+              {/* Close Button (Foreground Layer) */}
+              <button
+                onClick={() => {
+                  events.emitButtonClick({ buttonId: "robot-panel-close", action: "close-panel" });
+                  setShowRobotPanel(false);
+                }}
+                className="absolute top-4 right-4 p-2 rounded-full hover:bg-white/10 transition-all z-10"
+                style={{ 
+                  color: '#ffffff',
+                  transform: "translateZ(50px)",
+                }}
+                aria-label="Close"
+              >
+                <X size={20} />
+              </button>
+
+              {/* Panel Content (Mid Layer) */}
+              <div 
+                className="relative"
+                style={{ transform: "translateZ(30px)" }}
+              >
+                {/* Neuro-Core (Top Section) */}
+                <div className="text-center mb-6 relative" style={{ zIndex: 10 }}>
+                  <div className="relative w-20 h-20 mx-auto flex items-center justify-center mb-3" style={{ overflow: 'visible' }}>
+                    {/* Rotating Rings */}
+                    <div className="absolute inset-0 rounded-full border border-cyan-500/30" style={{ animation: 'spin 10s linear infinite' }} />
+                    <div className="absolute inset-2 rounded-full border border-cyan-400/20 border-t-transparent" style={{ animation: 'spin 3s linear infinite reverse' }} />
+                    <div className="absolute inset-6 rounded-full border-2 border-cyan-500/10 animate-pulse" />
+                    
+                    {/* Core Icon */}
+                    <div className="relative z-10 p-3 bg-slate-950/50 rounded-full border border-cyan-500/20 backdrop-blur-md shadow-[0_0_20px_rgba(34,211,238,0.2)]">
+                      <Hexagon size={28} className="text-cyan-400 animate-pulse" />
+                    </div>
+                    
+                    {/* Floating Data Nodes - positioned outside container */}
+                    <div className="absolute -right-8 top-0 text-[7px] font-mono text-cyan-300 whitespace-nowrap" style={{ animation: 'bounce 2s infinite' }}>CPU: 98%</div>
+                    <div className="absolute -left-8 bottom-0 text-[7px] font-mono text-cyan-300 whitespace-nowrap" style={{ animation: 'bounce 2s infinite', animationDelay: '150ms' }}>NET: 40TB</div>
+                  </div>
+                  
+                  <h2 className="text-xl font-bold uppercase tracking-widest mb-1" style={{ color: '#ffffff', textShadow: '0 0 10px rgba(34,211,238,0.5)' }}>
+                    Concierge AI
+                  </h2>
+                  <p className="text-[9px] font-mono text-cyan-500/60 tracking-widest">
+                    UNIT 734-ALPHA
+                  </p>
+                </div>
+
+                {/* System Vitals (Mid Section) */}
+                <div className="flex justify-between gap-2 mb-6 px-2 relative" style={{ zIndex: 10 }}>
+                  {[
+                    { label: 'Neural', icon: Cpu, val: systemVitals.neural, col: 'bg-cyan-500' },
+                    { label: 'Security', icon: Shield, val: systemVitals.security, col: 'bg-emerald-500' },
+                    { label: 'Uplink', icon: Wifi, val: systemVitals.uplink, col: 'bg-amber-500' }
+                  ].map((sys, i) => {
+                    const IconComponent = sys.icon;
+                    return (
+                      <div key={i} className="flex-1 bg-slate-900/50 border border-white/5 rounded-lg p-2 flex flex-col items-center group hover:border-cyan-500/30 transition-colors">
+                        <IconComponent size={12} className="text-slate-400 mb-2 group-hover:text-white transition-colors" />
+                        <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden mb-1">
+                          <div className={`h-full ${sys.col} transition-all duration-1000`} style={{ width: `${sys.val}%` }} />
+                        </div>
+                        <span className="text-[7px] font-mono uppercase text-slate-500">{sys.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Action Buttons (Foreground Layer) */}
+                <div 
+                  className="space-y-3"
+                  style={{ transform: "translateZ(50px)" }}
                 >
-                  Request Assistance
-                </button>
-                <button
-                  onClick={() => {
-                    handleTurn("Inquire about hotel services");
-                    setShowRobotPanel(false);
-                  }}
-                  className="w-full px-6 py-3 rounded-xl backdrop-blur-md border border-white/20 transition-all hover:bg-white/10"
-                  style={{
-                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-                    color: '#ffffff'
-                  }}
-                >
-                  Hotel Services
-                 </button>
+                  <button
+                    onClick={() => {
+                      events.emitButtonClick({ buttonId: "robot-panel-assistance", action: "request-assistance" });
+                      handleTurn("Ask the Concierge for assistance");
+                      setShowRobotPanel(false);
+                    }}
+                    className="w-full px-6 py-3 rounded-xl backdrop-blur-md border border-white/20 transition-all hover:bg-white/10 hover:border-cyan-400/40"
+                    style={{
+                      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                      color: '#ffffff',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.3), inset 0 0 20px rgba(34,211,238,0.05)',
+                    }}
+                  >
+                    Request Assistance
+                  </button>
+                  <button 
+                    onClick={() => {
+                      events.emitButtonClick({ buttonId: "robot-panel-services", action: "inquire-services" });
+                      handleTurn("Inquire about hotel services");
+                      setShowRobotPanel(false);
+                    }}
+                    className="w-full px-6 py-3 rounded-xl backdrop-blur-md border border-white/20 transition-all hover:bg-white/10 hover:border-cyan-400/40"
+                    style={{
+                      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                      color: '#ffffff',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.3), inset 0 0 20px rgba(34,211,238,0.05)',
+                    }}
+                  >
+                    Hotel Services
+                  </button>
+                </div>
               </div>
-              </div>
-           </div>
+            </div>
+            
+            {/* Decorative Corners (HUD Elements) - Outside tilt layer */}
+            <div className="absolute top-0 left-0 w-4 h-4 border-l border-t border-cyan-500/50 rounded-tl-lg pointer-events-none z-20" />
+            <div className="absolute top-0 right-0 w-4 h-4 border-r border-t border-cyan-500/50 rounded-tr-lg pointer-events-none z-20" />
+            <div className="absolute bottom-0 left-0 w-4 h-4 border-l border-b border-cyan-500/50 rounded-bl-lg pointer-events-none z-20" />
+            <div className="absolute bottom-0 right-0 w-4 h-4 border-r border-b border-cyan-500/50 rounded-br-lg pointer-events-none z-20" />
+            
+            {/* Status Light - Outside tilt layer */}
+            <div className="absolute -right-1 top-10 w-1 h-8 rounded-l-sm bg-cyan-500 shadow-[0_0_10px_#06b6d4] pointer-events-none z-20" />
+          </div>
         </div>
       )}
     </div>

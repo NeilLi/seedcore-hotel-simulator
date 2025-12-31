@@ -1,10 +1,7 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
-  Activity,
   Layers,
-  Terminal,
   Power,
-  Film,
   X,
   Loader2,
 } from "lucide-react";
@@ -21,42 +18,10 @@ import { GRID_WIDTH, GRID_HEIGHT, TICK_RATE_MS } from "./constants";
 
 import { SvgHotelBackdrop } from "./components/SvgHotelBackdrop";
 import { VirtualLobby } from "./components/VirtualLobby";
+import { ConciergePanel } from "./components/ConciergePanel";
+import { useEventTracking } from "./hooks/useEventTracking";
+import { kafkaPublisher } from "./services/kafkaPublisher";
 
-/* ------------------ LEFT PANEL ------------------ */
-
-const SensoryTelemetryPanel = ({ active }: { active: boolean }) => {
-  const [lux, setLux] = useState(450);
-  const [db, setDb] = useState(45);
-  const [temp, setTemp] = useState(22);
-
-  useEffect(() => {
-    if (!active) return;
-    const i = setInterval(() => {
-      setLux((v) => Math.min(800, Math.max(200, v + (Math.random() - 0.5) * 50)));
-      setDb((v) => Math.min(90, Math.max(30, v + (Math.random() - 0.5) * 10)));
-      setTemp(22 + (Math.random() - 0.5));
-    }, 1000);
-    return () => clearInterval(i);
-  }, [active]);
-
-  return (
-    <div className="absolute top-24 left-8 w-64 bg-slate-950/40 backdrop-blur-xl border border-cyan-500/20 p-6 rounded-xl z-30 pointer-events-none">
-      <h3 className="text-[10px] font-bold text-cyan-400 uppercase tracking-[0.3em] mb-6 flex items-center gap-2">
-        <Activity size={14} />
-        {active ? "Sensory Data" : "Sensors Off"}
-      </h3>
-      <div className="text-[9px] font-mono text-cyan-400">
-        Lux: {active ? lux.toFixed(0) : "---"} lx
-      </div>
-      <div className="text-[9px] font-mono text-cyan-400">
-        Noise: {active ? db.toFixed(0) : "---"} dB
-      </div>
-      <div className="text-[9px] font-mono text-cyan-400">
-        Temp: {active ? temp.toFixed(1) : "---"} °C
-      </div>
-    </div>
-  );
-};
 
 /* ------------------ MAIN APP ------------------ */
 
@@ -68,6 +33,14 @@ const App: React.FC = () => {
   const [grid, setGrid] = useState<EntityType[][]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  
+  // Event tracking
+  const events = useEventTracking();
+
+  // Sync AI enabled state with Kafka publisher (for boot screen safety net)
+  useEffect(() => {
+    kafkaPublisher.setAiEnabled(aiEnabled);
+  }, [aiEnabled]);
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [loadingVideo, setLoadingVideo] = useState(false);
@@ -88,15 +61,102 @@ const App: React.FC = () => {
 
   const tick = useCallback(() => {
     if (!grid.length) return;
-    setAgents((a) => updateAgentsLogic(a, grid));
-    setCoreState((s) => ({ ...s, timeOfDay: (s.timeOfDay + 0.05) % 24 }));
-  }, [grid]);
+    
+    setAgents((prevAgents) => {
+      const updated = updateAgentsLogic(prevAgents, grid);
+      
+      // Track position changes
+      updated.forEach((agent) => {
+        const prev = prevAgents.find((a) => a.id === agent.id);
+        if (prev && (prev.position.x !== agent.position.x || prev.position.y !== agent.position.y)) {
+          // Position updates not in ALLOWED_EVENT_TYPES - skip for now
+          // events.emitRobotPositionUpdated(...);
+        }
+        
+        // Track state changes (throttled - only emit significant state transitions)
+        if (prev && prev.state !== agent.state) {
+          // Only emit for significant state changes (skip frequent WALKING/PAUSING oscillations)
+          const significantStates = ['SOCIALIZING', 'SERVICING', 'CHARGING', 'OBSERVING'];
+          const isSignificant = significantStates.includes(agent.state) || 
+                                significantStates.includes(prev.state);
+          
+          if (isSignificant || Math.random() < 0.1) { // Emit 10% of minor state changes
+            events.emitAgentStateChanged({
+              agentId: agent.id,
+              agentRole: agent.role,
+              state: agent.state,
+              previousState: prev.state,
+            });
+          }
+        }
+      });
+      
+      return updated;
+    });
+    
+    setCoreState((s) => {
+      const newTime = (s.timeOfDay + 0.05) % 24;
+      // Time updates not in ALLOWED_EVENT_TYPES - skip for now
+      // events.emitTimeUpdated(newTime, s.timeOfDay);
+      return { ...s, timeOfDay: newTime };
+    });
+  }, [grid, events]);
 
   useEffect(() => {
     if (!initialized) return;
+    if (!aiEnabled) return; // ✅ Pause simulation on boot screen
+    
     const i = setInterval(tick, TICK_RATE_MS);
     return () => clearInterval(i);
-  }, [initialized, tick]);
+  }, [initialized, aiEnabled, tick]);
+  
+  // Track atmosphere changes
+  const prevAtmosphereRef = useRef(coreState.activeAtmosphere);
+  useEffect(() => {
+    if (prevAtmosphereRef.current !== coreState.activeAtmosphere) {
+      // Atmosphere changes not in ALLOWED_EVENT_TYPES - skip for now
+      // events.emitAtmosphereChanged(coreState.activeAtmosphere, prevAtmosphereRef.current);
+      prevAtmosphereRef.current = coreState.activeAtmosphere;
+    }
+  }, [coreState.activeAtmosphere, events]);
+  
+  // Track room occupancy changes (throttled + only emit on actual changes)
+  const lastOccupancyCheck = useRef(0);
+  const lastOccupancyMap = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (!initialized || !aiEnabled) return; // ✅ Pause occupancy checks on boot screen
+    if (rooms.length === 0 || agents.length === 0) return;
+    
+    const now = Date.now();
+    if (now - lastOccupancyCheck.current < 5000) return; // Check max once per 5s (increased from 2s)
+    lastOccupancyCheck.current = now;
+    
+    rooms.forEach((room) => {
+      if (!room.topLeft || !room.bottomRight) return;
+      const occupancy = agents.filter((agent) => {
+        return (
+          agent.position.x >= room.topLeft!.x &&
+          agent.position.x <= room.bottomRight!.x &&
+          agent.position.y >= room.topLeft!.y &&
+          agent.position.y <= room.bottomRight!.y
+        );
+      }).length;
+      
+      // Only emit if occupancy actually changed
+      const lastOccupancy = lastOccupancyMap.current.get(room.id);
+      if (lastOccupancy !== occupancy) {
+        lastOccupancyMap.current.set(room.id, occupancy);
+        events.emitRoomOccupancyChanged({
+          roomId: room.id,
+          roomName: room.name,
+          occupancy,
+        });
+      }
+    });
+  }, [agents, rooms, initialized, aiEnabled, events]);
+  
+  // Note: Pointer movements are NOT sent to Kafka (high-frequency noise)
+  // They're kept local for UI interactions only
 
   const requestShot = async (desc: string) => {
     if (!aiEnabled) return;
@@ -150,7 +210,8 @@ const App: React.FC = () => {
             </button>
           </header>
 
-          <SensoryTelemetryPanel active={aiEnabled} />
+          {/* ConciergePanel rendered last to ensure it's above all transforms/filters */}
+          <ConciergePanel active={aiEnabled} />
 
           {videoUrl && (
             <div className="absolute inset-0 bg-black/90 z-50 flex items-center justify-center">

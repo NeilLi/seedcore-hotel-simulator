@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { Kafka } from "kafkajs";
 
 // Load environment variables from .env.local
 const __filename = fileURLToPath(import.meta.url);
@@ -269,6 +270,151 @@ app.post("/api/tts", async (req, res) => {
   }
 });
 
+// --- 3) Kafka Publisher Endpoint ---
+let kafkaClient = null;
+let kafkaProducer = null;
+
+// Check if Confluent/Kafka is enabled
+const CONFLUENT_ENABLED = process.env.CONFLUENT_ENABLED === "true" || process.env.CONFLUENT_ENABLED === "1";
+
+// Support both CONFLUENT_* and KAFKA_* env vars (CONFLUENT_* takes precedence)
+const CONFLUENT_BOOTSTRAP_SERVERS = process.env.CONFLUENT_BOOTSTRAP_SERVERS;
+const CONFLUENT_API_KEY = process.env.CONFLUENT_API_KEY;
+const CONFLUENT_API_SECRET = process.env.CONFLUENT_API_SECRET;
+const CONFLUENT_SECURITY_PROTOCOL = process.env.CONFLUENT_SECURITY_PROTOCOL;
+
+// Use CONFLUENT_* if available, otherwise fall back to KAFKA_*
+const KAFKA_BROKERS = CONFLUENT_BOOTSTRAP_SERVERS 
+  ? [CONFLUENT_BOOTSTRAP_SERVERS]
+  : (process.env.KAFKA_BROKERS?.split(",") || []);
+const KAFKA_CLIENT_ID = process.env.KAFKA_CLIENT_ID || "seedcore-server";
+const KAFKA_USERNAME = CONFLUENT_API_KEY || process.env.KAFKA_USERNAME;
+const KAFKA_PASSWORD = CONFLUENT_API_SECRET || process.env.KAFKA_PASSWORD;
+// SSL is true if CONFLUENT_SECURITY_PROTOCOL is SASL_SSL, or if KAFKA_SSL is "true"
+const KAFKA_SSL = CONFLUENT_SECURITY_PROTOCOL === "SASL_SSL" || process.env.KAFKA_SSL === "true";
+
+if (CONFLUENT_ENABLED && KAFKA_BROKERS.length > 0 && KAFKA_BROKERS[0]) {
+  try {
+    kafkaClient = new Kafka({
+      clientId: KAFKA_CLIENT_ID,
+      brokers: KAFKA_BROKERS,
+      ssl: KAFKA_SSL,
+      sasl: KAFKA_USERNAME ? {
+        mechanism: "plain",
+        username: KAFKA_USERNAME,
+        password: KAFKA_PASSWORD || "",
+      } : undefined,
+    });
+
+    kafkaProducer = kafkaClient.producer();
+    kafkaProducer.connect().then(() => {
+      console.log("[Kafka] ✅ Connected to brokers:", KAFKA_BROKERS);
+      if (CONFLUENT_BOOTSTRAP_SERVERS) {
+        console.log("[Kafka] Using Confluent Cloud configuration");
+      }
+    }).catch((err) => {
+      console.error("[Kafka] ❌ Connection failed:", err.message);
+    });
+  } catch (error) {
+    console.warn("[Kafka] ⚠️  Initialization failed:", error.message);
+  }
+} else {
+  if (!CONFLUENT_ENABLED) {
+    console.log("[Kafka] ⚠️  Disabled (CONFLUENT_ENABLED is not 'true' or '1')");
+  } else {
+    console.log("[Kafka] ⚠️  Disabled (no KAFKA_BROKERS or CONFLUENT_BOOTSTRAP_SERVERS in env)");
+  }
+}
+
+// Allowed event types (meaningful events only)
+const ALLOWED_EVENT_TYPES = new Set([
+  "ui.hotspot.entered",
+  "ui.hotspot.left",
+  "ui.voice.transcript.final",
+  "ui.button.clicked",
+  "ui.keyboard.pressed",
+  "sim.room.occupancy.changed",
+  "sim.agent.state.changed",
+]);
+
+// --- 4) Events Endpoint (publishes to seedcore.hotel.events) ---
+app.post("/api/events", async (req, res) => {
+  try {
+    // Check if Confluent is enabled first
+    if (!CONFLUENT_ENABLED) {
+      // If Confluent is disabled, accept events but don't publish
+      return res.json({ 
+        success: true, 
+        published: 0,
+        message: "Confluent disabled (CONFLUENT_ENABLED is not 'true')"
+      });
+    }
+
+    if (!kafkaProducer) {
+      // If Kafka not configured, still return success (dev mode)
+      return res.json({ 
+        success: true, 
+        published: 0,
+        message: "Kafka not configured (missing broker/credentials)"
+      });
+    }
+
+    const { events } = req.body ?? {};
+    if (!Array.isArray(events) || events.length === 0) {
+      return res.status(400).json({ error: "Missing or empty events array" });
+    }
+
+    // Filter: Only publish allowed event types
+    const allowedEvents = events.filter((event) => {
+      if (!event.type || !ALLOWED_EVENT_TYPES.has(event.type)) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`[Events] Dropping non-allowed event type: ${event.type}`);
+        }
+        return false;
+      }
+      return true;
+    });
+
+    if (allowedEvents.length === 0) {
+      return res.json({ 
+        success: true, 
+        published: 0,
+        message: "No allowed events to publish"
+      });
+    }
+
+    // Publish to single topic: seedcore.hotel.events
+    // Key = sessionId (ensures ordering per session across partitions)
+    const messages = allowedEvents.map((event) => ({
+      key: event.sessionId || "unknown",
+      value: JSON.stringify(event),
+    }));
+
+    await kafkaProducer.send({
+      topic: "seedcore.hotel.events",
+      messages: messages,
+    });
+
+    // Only log periodically to avoid message storm (every 100 total events or first 10 batches)
+    if (!global.eventPublishCount) global.eventPublishCount = 0;
+    global.eventPublishCount += allowedEvents.length;
+    
+    const shouldLog = global.eventPublishCount % 100 === 0 || global.eventPublishCount <= 10;
+    if (shouldLog) {
+      console.log(`[Events] ✅ Published ${allowedEvents.length} events (total: ${global.eventPublishCount}) to seedcore.hotel.events`);
+    }
+
+    res.json({ 
+      success: true, 
+      published: allowedEvents.length,
+      dropped: events.length - allowedEvents.length
+    });
+  } catch (e) {
+    console.error("[Events] Publish error:", e);
+    res.status(500).json({ error: "Event publish failed", message: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 8787;
 app.listen(PORT, () => {
   console.log(`NPC server running on :${PORT}`);
@@ -283,5 +429,20 @@ app.listen(PORT, () => {
     console.log("✅ ELEVENLABS_API_KEY loaded");
   }
   console.log(`[NPC Server] Will try models in order:`, AVAILABLE_MODELS.slice(0, 3).join(", "), "...");
+  
+  if (CONFLUENT_ENABLED) {
+    if (KAFKA_BROKERS.length > 0) {
+      console.log(`[Kafka] ✅ Enabled and configured with brokers:`, KAFKA_BROKERS);
+      if (CONFLUENT_BOOTSTRAP_SERVERS) {
+        console.log(`[Kafka] Using Confluent Cloud (CONFLUENT_* env vars)`);
+      } else {
+        console.log(`[Kafka] Using KAFKA_* env vars`);
+      }
+    } else {
+      console.log(`[Kafka] ⚠️  Enabled but not configured (no brokers found)`);
+    }
+  } else {
+    console.log(`[Kafka] ⚠️  Disabled (CONFLUENT_ENABLED is not 'true' or '1')`);
+  }
 });
 

@@ -1,9 +1,8 @@
-import { type Room, type Agent } from "../types";
+import type { Room, Agent } from "../types";
 
 export function getTheme(atmosphere: string) {
   const isGolden = atmosphere === "GOLDEN_HOUR";
   const isNight = atmosphere === "MIDNIGHT_LOUNGE";
-  const isEvening = atmosphere === "EVENING_CHIC";
 
   // Holographic Palette
   const colors = {
